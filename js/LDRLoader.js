@@ -141,8 +141,9 @@ THREE.LDRLoader.prototype.parse = function(data) {
     let dataLines = data.split(/(\r\n)|\n/);
     for(let i = 0; i < dataLines.length; i++) {
 	let line = dataLines[i];
-	if(!line)
+	if(!line) {
 	    continue; // Empty line, or 'undefined' due to '\r\n' split.
+        }
 
 	let parts = line.split(" ").filter(x => x !== ''); // Remove empty strings.
 	if(parts.length <= 1) {
@@ -165,7 +166,7 @@ THREE.LDRLoader.prototype.parse = function(data) {
 	}
 
 	var self = this;
-        var saveThisHeaderLine = true;
+        let saveThisHeaderLine = true;
 	function setModelDescription() {
 	    if(part.modelDescription || !previousComment) {
 		return; // Already set or not present.
@@ -674,7 +675,7 @@ THREE.LDRStep.prototype.cloneColored = function(colorID) {
     return ret;
 }
 
-    THREE.LDRStep.prototype.toLDR= function(loader, prevStepRotation, isLastStep) {
+THREE.LDRStep.prototype.toLDR = function(loader, prevStepRotation, isLastStep) {
     let ret = '';
     this.fileLines.forEach(line => ret += line.toLDR(loader));
     if(!this.rotation) {
@@ -1078,7 +1079,14 @@ THREE.LDRPartType.prototype.addStep = function(step) {
     this.steps.push(step);
     this.lastRotation = step.rotation;
 }
-    
+
+/**
+   Generate the THREE.js geometries (lines, conditional lines and triangles) for the part with color 'c', position 'p' and rotation 'r'.
+   Enable back face culling if 'cull' is true.
+   Inverts the geometry if 'inv' is true.
+   'mc' is the mesh collector to which the geometries are added.
+   'pd' is a part description used as a back reference by the step editor.
+ */
 THREE.LDRPartType.prototype.generateThreePart = function(loader, c, p, r, cull, inv, mc, pd) {
     if(!this.geometry) {
 	if(this.isPart()) {
@@ -1118,7 +1126,7 @@ THREE.LDRPartType.prototype.generateThreePart = function(loader, c, p, r, cull, 
     
     if(this.geometry.triangleGeometry) {
 	let material = new LDR.Colors.buildTriangleMaterial(this.geometry.triangleColorManager, c, LDR.Colors.isTrans(c));
-	let mesh = new THREE.Mesh(this.geometry.triangleGeometry.clone(), material); // Using clone to ensure matrix in next line doesn't affect other usages of the geometry..
+	let mesh = new THREE.Mesh(this.geometry.triangleGeometry.clone(), material); // Using clone to ensure matrix in next line doesn't affect other usages of the geometry.
 	mesh.geometry.applyMatrix(m4);
 	//mesh.applyMatrix(m4); // Doesn't work for LDraw library as the matrix needs to be decomposable to position, quaternion and scale.
 	if(LDR.Colors.isTrans(c)) {
@@ -1128,6 +1136,31 @@ THREE.LDRPartType.prototype.generateThreePart = function(loader, c, p, r, cull, 
 	    mc.addOpaque(mesh, pd);
         }
     }
+
+    this.geometry.primitives.forEach(primitive => {
+            //console.log('Adding ' + primitive.p.length + ' of type ' + primitive.type + ' and color ' + primitive.c + ' for ' + pd.ID);
+            let type = LDR.ExtractedPrimitives[primitive.type];
+            let pt = loader.partTypes[type];
+
+            let color = primitive.c;
+            if(color === 16) {
+                color = c;
+            }
+
+            function getPosition(p2) {
+                let position = new THREE.Vector3();
+                position.copy(p2);
+                position.applyMatrix3(r);
+                position.add(p);
+                return position;
+            }      
+
+            let rotation = new THREE.Matrix3();
+            rotation.multiplyMatrices(r, primitive.r);
+
+            primitive.p.forEach(p => pt.generateThreePart(loader, color, getPosition(p),
+                                                          rotation, true, false, mc, pd));
+        });
 
     let b = this.geometry.boundingBox;
     mc.expandBoundingBox(b, m4);

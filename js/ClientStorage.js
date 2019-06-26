@@ -1,7 +1,7 @@
 'use strict';
 
 LDR.STORAGE = function(onDone) {
-    this.req = indexedDB.open("ldraw", 2); 
+    this.req = indexedDB.open("ldraw", 3);
     this.db;
 
     this.req.onupgradeneeded = function(event) {
@@ -10,7 +10,7 @@ LDR.STORAGE = function(onDone) {
 
 	var partsStore = this.transaction.objectStore("parts");
 
-	if (partsStore && event.oldVersion < 2) {
+	if (partsStore && event.oldVersion < 3) {
 	    // Colors in the 10k+ range need to be updated to 100k+
 	    // But since the parts are compacted, they are simply purged:
 	    partsStore.clear();

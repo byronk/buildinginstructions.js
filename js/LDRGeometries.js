@@ -43,12 +43,21 @@ LDR.vertexLessThan = function(a, b) {
     return a.z < b.z;
 }
 
+LDR.ExtractedPrimitives = ['stud.dat', 'stud2.dat', 'stud3.dat', 'stud4.dat'];
+function arrayToLookup(a) {
+    let ret = {};
+    a.forEach((p, idx) => ret[p] = idx);
+    return ret;
+}
+LDR.ExtractedPrimitivesLookup = arrayToLookup(LDR.ExtractedPrimitives);
+
 LDR.LDRGeometry = function() {
     this.vertices = []; // sorted (x,y,z).
     this.lines = {}; // c -> [{p1,p2},...] (color -> indices)
     this.conditionalLines = {}; // c -> [{p1,p2,p3,p4},...]
     this.triangles = {}; // c -> [{p1,p2,p3},...]
     this.quads = {}; // c -> [{p1,p2,p3},...]
+    this.primitives = []; // [{c,p...,r,type}], where type is the index in LDR.ExtractedPrimitives
     this.cull = true;
     // geometries:
     this.lineColorManager;
@@ -58,30 +67,6 @@ LDR.LDRGeometry = function() {
     this.conditionalLineGeometry;
     this.geometriesBuilt = false;
     this.boundingBox = new THREE.Box3();
-}
-
-LDR.LDRGeometry.prototype.serialize = function() {
-    let c = this.pack();
-    let ret = '2'; // version
-
-    function format(x) {
-	if(x == Math.round(x)) {
-	    return x;
-        }
-	return x.toFixed(3);
-    }
-
-    let fArray = c.f;
-    ret += ',' + fArray.length;
-    for(let i = 0; i < fArray.length; i++) {
-	ret += ',' + format(fArray[i]);
-    }
-    let iArray = c.i;
-    ret += ',' + iArray.length;
-    for(let i = 0; i < iArray.length; i++) {
-	ret += ',' + iArray[i];
-    }
-    return ret;
 }
 
 LDR.LDRGeometry.prototype.pack = function() {
@@ -135,29 +120,23 @@ LDR.LDRGeometry.prototype.pack = function() {
     handle(this.triangles, 3);
     handle(this.quads, 4);
 
+    // New for version 3: Primitives:
+    arrayI.push(this.primitives.length);
+    this.primitives.forEach(cpr => {
+            arrayI.push(cpr.c);
+            arrayI.push(cpr.type);
+            arrayI.push(cpr.p.length);
+            let r = cpr.r.elements;
+            for(let x = 0; x < 3; x++) {
+                for(let y = 0; y < 3; y++) {
+                    arrayF.push(r[3*y+x]); // .elements and .set are inverse of each other.
+                }
+            }
+            cpr.p.forEach(p => arrayF.push(p.x, p.y, p.z));
+        });
+
     let i = this.vertices.length > 32767 ? new Int32Array(arrayI) : new Int16Array(arrayI);
     return {f:new Float32Array(arrayF), i:i};
-}
-
-LDR.LDRGeometry.prototype.deserialize = function(txt) {
-    let a = Float32Array.from(txt.split(/\,/));
-    if(a[0] !== 1) {
-	throw 'version error!';
-    }
-
-    let sizeF = a[1];
-    let arrayF = [], arrayI = [];
-    let idx = 2;
-    for(let i = 0; i < sizeF; i++) {
-	arrayF.push(a[idx++]);
-    }
-    let sizeI = a[idx++];
-    for(let i = 0; i < sizeI; i++) {
-	arrayI.push(a[idx++]);
-    }
-
-    let packed = {f:arrayF, i:arrayI};
-    this.unpack(packed);
 }
 
 LDR.LDRGeometry.prototype.unpack = function(packed) {
@@ -214,6 +193,23 @@ LDR.LDRGeometry.prototype.unpack = function(packed) {
     extract(4, this.conditionalLines, 2);
     extract(3, this.triangles, 3);
     extract(4, this.quads, 4);
+
+    // New for version 3: Primitives:
+    let numPrimitives = arrayI[idxI++];
+    for(let i = 0; i < numPrimitives; i++) {
+        let primitive = {c:arrayI[idxI++], type:arrayI[idxI++], p:[], r:new THREE.Matrix3()};
+
+        primitive.r.set(arrayF[idxF++], arrayF[idxF++], arrayF[idxF++],
+                        arrayF[idxF++], arrayF[idxF++], arrayF[idxF++],
+                        arrayF[idxF++], arrayF[idxF++], arrayF[idxF++]);
+
+        let numPositions = arrayI[idxI++];
+        for(let j = 0; j < numPositions; j++) {
+            primitive.p.push(new THREE.Vector3(arrayF[idxF++], arrayF[idxF++], arrayF[idxF++]));
+        }
+
+        this.primitives.push(primitive);
+    }
 
     // Build bounding box:
     this.vertices.forEach(v => {
@@ -462,6 +458,7 @@ LDR.LDRGeometry.prototype.replaceWith = function(g) {
     this.quads = g.quads;
     this.cull = g.cull;
     this.boundingBox = g.boundingBox;
+    this.primitives = g.primitives;
 }
 
 LDR.LDRGeometry.prototype.replaceWithDeep = function(g) {
@@ -521,6 +518,15 @@ LDR.LDRGeometry.prototype.replaceWithDeep = function(g) {
 
     this.cull = g.cull;
     this.boundingBox.copy(g.boundingBox);
+
+    // Primitives:
+    let ownPrimitives = this.primitives;
+    g.primitives.forEach(primitive => {
+            let ownPrimitive = {c:primitive.c, p:[], r:new THREE.Matrix3(), type:primitive.type};
+            ownPrimitive.r.copy(primitive.r);
+            primitive.p.forEach(position => ownPrimitive.p.push(new THREE.Vector3(position.x, position.y, position.z)));
+            ownPrimitives.push(ownPrimitive);
+        });
 }
 
 /*
@@ -691,8 +697,17 @@ LDR.LDRGeometry.prototype.fromStep = function(loader, step, parent) {
         geometries.push(g);
     }
     function handleSubModel(subModel) {
+        let id = subModel.ID;
         let g = new LDR.LDRGeometry(); 
-	g.fromPartDescription(loader, subModel);
+        if(LDR.ExtractedPrimitivesLookup.hasOwnProperty(id)) {
+            let c = subModel.colorID;
+            let r = subModel.rotation;
+            let type = LDR.ExtractedPrimitivesLookup[id];
+            g.primitives.push({c:c, p:[subModel.position], r:r, type:type});
+        }
+        else {
+            g.fromPartDescription(loader, subModel);
+        }
         geometries.push(g);
     }
     step.subModels.forEach(handleSubModel);
@@ -716,11 +731,13 @@ LDR.LDRGeometry.prototype.fromPartType = function(loader, pt) {
 }
 
 LDR.LDRGeometry.prototype.fromPartDescription = function(loader, pd) {
-    if(!loader.partTypes[pd.ID].geometry) {
-	console.dir(loader.partTypes[pd.ID]);
-	throw "Missing geometry on " + pd.ID;
+    let pt = loader.partTypes[pd.ID];
+    if(!pt.geometry) {
+        let g = new LDR.LDRGeometry();
+	g.fromPartType(loader, pt);
+        pt.geometry = g;
     }
-    this.replaceWithDeep(loader.partTypes[pd.ID].geometry);
+    this.replaceWithDeep(pt.geometry);
     this.cull = this.cull && pd.cull;
 
     let m4 = new THREE.Matrix4();
@@ -738,17 +755,10 @@ LDR.LDRGeometry.prototype.fromPartDescription = function(loader, pd) {
     // Function to update color (notice that input and output are strings):
     let replaceColor;
     if(pd.colorID === 16) {
-	replaceColor = function(x){return x;}; // Do nothing.
+	replaceColor = x => x; // Do nothing.
     }
     else if(pd.colorID === 24) {	    
-	replaceColor = function(x) {
- 	    if(x === '16') {
-		return '24';
-            }
-	    else {
-		return x;
-            }
-	};
+	replaceColor = x => x === '16' ? '24' : x;
     }
     else {
 	replaceColor = function(x) {
@@ -786,7 +796,6 @@ LDR.LDRGeometry.prototype.fromPartDescription = function(loader, pd) {
     }
     
     // Update the indices and colors on the primitives:
-
     for(let c in this.lines) {
 	if(!this.lines.hasOwnProperty(c)) {
 	    continue;
@@ -946,6 +955,31 @@ LDR.LDRGeometry.prototype.fromPartDescription = function(loader, pd) {
 	    }
 	}
     }
+
+    // Update primitives:
+    if(invert && this.primitives.length > 0) {
+	console.warn("Unable to invert externalised primitives for " + pd.ID);        
+    }
+    this.primitives.forEach(primitive => {
+            // Update color:
+            if(primitive.c === 16) {
+                primitive.c = pd.colorID;
+            }
+            else if(primitive.c === 24) {
+                primitive.c = -pd.colorID - 1;
+            }
+
+            // Update positions:
+            primitive.p.forEach(p => {
+                    p.applyMatrix3(pd.rotation);
+                    p.add(pd.position);
+                });
+
+            // Update rotation:
+            let rotation = new THREE.Matrix3();
+            rotation.multiplyMatrices(pd.rotation, primitive.r);
+            primitive.r = rotation; // TODO Check
+        });
 
     // Clean up:
     for(let i = 0; i < this.vertices.length; i++) {
@@ -1119,4 +1153,20 @@ LDR.LDRGeometry.prototype.merge = function(other) {
 	    this.quads[c] = other.quads[c];
         }
     }
+
+    // Merge primitives:
+    let primitives = this.primitives;
+    other.primitives.forEach(otherPrimitive => {
+            let c = otherPrimitive.c;
+            let type = otherPrimitive.type;
+            let r = otherPrimitive.r;
+            // Check if we have same primitive already - then they should be merged:
+            let primitive = primitives.find(p => p.c === c && p.type === type && p.r.equals(r));
+            if(primitive) {
+                primitive.p.push(...otherPrimitive.p);
+            }
+            else {
+                primitives.push(otherPrimitive);
+            }
+        });
 }
